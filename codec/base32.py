@@ -18,15 +18,18 @@ BLOCK_SIZE = 8
 PADDING = "="
 LOOKALIKES = {"O": "0", "I": "1", "L": "1", "U": "V"}
 
+# 字符 -> 数值，供校验位加权求和使用。
+_CHAR_VALUE = {ch: i for i, ch in enumerate(ALPHABET)}
+
 
 def strip_separators(text: str) -> str:
     """去掉连字符与空白，保留其余字符。"""
-    raise NotImplementedError("strip_separators 未实现")
+    return "".join(ch for ch in text if ch != "-" and not ch.isspace())
 
 
 def fold_case(text: str) -> str:
     """把字母统一为大写，其余字符原样保留。"""
-    raise NotImplementedError("fold_case 未实现")
+    return text.upper()
 
 
 def map_lookalikes(text: str) -> str:
@@ -34,7 +37,7 @@ def map_lookalikes(text: str) -> str:
 
     只处理大写字母，小写字母应先经 fold_case。
     """
-    raise NotImplementedError("map_lookalikes 未实现")
+    return "".join(LOOKALIKES.get(ch, ch) for ch in text)
 
 
 def validate_alphabet(text: str) -> list[str]:
@@ -44,7 +47,22 @@ def validate_alphabet(text: str) -> list[str]:
     去掉末尾填充后的长度不是八的整数倍记一条以 bad_length 开头的问题，
     只满足模二或模四对齐的长度同样非法。
     """
-    raise NotImplementedError("validate_alphabet 未实现")
+    problems: list[str] = []
+
+    # 末尾填充不参与字符与长度校验；中间的等号会保留并按非法字符处理。
+    core = text.rstrip(PADDING)
+
+    for ch in core:
+        if ch not in _CHAR_VALUE:
+            problems.append(f"illegal_char: 字符 {ch!r} 不在 base32 字母表中")
+
+    if len(core) == 0 or len(core) % BLOCK_SIZE != 0:
+        problems.append(
+            f"bad_length: 去掉末尾填充后长度为 {len(core)}，"
+            f"必须是非零的 {BLOCK_SIZE} 的整数倍"
+        )
+
+    return problems
 
 
 def add_padding(text: str) -> str:
@@ -53,7 +71,27 @@ def add_padding(text: str) -> str:
     已有填充时必须正好等于所需数量，多余或不足都抛 ValueError；
     等号出现在中间也抛 ValueError。
     """
-    raise NotImplementedError("add_padding 未实现")
+    first_pad = text.find(PADDING)
+
+    if first_pad == -1:
+        needed = (-len(text)) % BLOCK_SIZE
+        return text + PADDING * needed
+
+    # 第一个等号之后只允许继续出现等号，否则就是填充落在了中间。
+    base = text[:first_pad]
+    suffix = text[first_pad:]
+    if any(ch != PADDING for ch in suffix):
+        raise ValueError("invalid_padding: 填充符 '=' 只能出现在末尾")
+
+    existing = len(suffix)
+    needed = (-len(base)) % BLOCK_SIZE
+    if existing != needed:
+        raise ValueError(
+            f"invalid_padding: 数据长度 {len(base)} 需要 {needed} 个填充符，"
+            f"实际有 {existing} 个"
+        )
+
+    return text
 
 
 def check_digit(text: str) -> str:
@@ -62,7 +100,11 @@ def check_digit(text: str) -> str:
     先折叠大小写、映射易混字符，再按奇数权重求加权和并对三十二取模，
     取模结果当下标从字母表取字符。
     """
-    raise NotImplementedError("check_digit 未实现")
+    canonical = map_lookalikes(fold_case(text))
+    weighted_sum = sum(
+        _CHAR_VALUE[ch] * (2 * i + 1) for i, ch in enumerate(canonical)
+    )
+    return ALPHABET[weighted_sum % len(ALPHABET)]
 
 
 def normalize(text: str) -> str:
@@ -71,7 +113,21 @@ def normalize(text: str) -> str:
     依次去分隔符、折叠大小写、映射易混字符、校验字符与长度，
     非法输入抛 ValueError；归一必须幂等。
     """
-    raise NotImplementedError("normalize 未实现")
+    canonical = map_lookalikes(fold_case(strip_separators(text)))
+
+    problems = validate_alphabet(canonical)
+    if problems:
+        raise ValueError("; ".join(problems))
+
+    # 规范输出不带填充；校验已保证去填充后的长度是八的整数倍。
+    return canonical.rstrip(PADDING)
+
+
+def _group_four(canonical: str) -> str:
+    """从第一个字符起每四个字符插一个连字符。"""
+    return "-".join(
+        canonical[i : i + 4] for i in range(0, len(canonical), 4)
+    )
 
 
 def code_batch(codes, policy) -> dict:
@@ -83,4 +139,28 @@ def code_batch(codes, policy) -> dict:
         strict: True             为真时遇到非法码立即抛 ValueError，
                                  为假时跳过非法码，不写入结果
     """
-    raise NotImplementedError("code_batch 未实现")
+    policy = policy or {}
+    keep_separators = policy.get("keep_separators", False)
+    with_check_digit = policy.get("with_check_digit", False)
+    strict = policy.get("strict", True)
+
+    result: dict = {}
+    for code in codes:
+        try:
+            canonical = normalize(code)
+        except ValueError:
+            if strict:
+                raise
+            continue
+
+        # 校验位基于不带分隔符的规范码计算。
+        digit = check_digit(canonical) if with_check_digit else None
+
+        # 先分组，再把校验位追加到末尾：校验位不参与四位分组。
+        value = _group_four(canonical) if keep_separators else canonical
+        if with_check_digit:
+            value += digit
+
+        result[code] = value
+
+    return result
